@@ -1,0 +1,12 @@
+{
+  "name": "tbc-daily-heroic-bot",
+  "version": "1.0.0",
+  "description": "Daily heroic dungeon poll bot for TBC Anniversary WoW",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1"
+  }
+}
