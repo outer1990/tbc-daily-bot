@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, REST, Routes, SlashCommandBuilder } = require('discord.js');
 
 const client = new Client({
   intents: [
@@ -11,8 +11,8 @@ const client = new Client({
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const DISCORD_TOKEN   = process.env.DISCORD_TOKEN;
-const CHANNEL_ID      = process.env.CHANNEL_ID;       // channel to post polls in
-const RESET_HOUR      = parseInt(process.env.RESET_HOUR  ?? '9');   // 24h UTC
+const CHANNEL_ID      = process.env.CHANNEL_ID;
+const RESET_HOUR      = parseInt(process.env.RESET_HOUR  ?? '15');
 const RESET_MINUTE    = parseInt(process.env.RESET_MINUTE ?? '0');
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -32,20 +32,20 @@ const DUNGEONS = [
   { emoji: '🇨', name: 'Shadow Labyrinth' },
   { emoji: '🇩', name: 'Old Hillsbrad Foothills' },
   { emoji: '🇪', name: 'The Black Morass' },
-  { emoji: '🇫', name: 'Magisters\' Terrace' },
+  { emoji: '🇫', name: "Magisters' Terrace" },
 ];
 
 let currentPollMessageId = null;
-let currentPollChannelId = null;
 
-async function postDailyPoll() {
-  const channel = await client.channels.fetch(CHANNEL_ID).catch(() => null);
+async function postDailyPoll(channel) {
   if (!channel) {
-    console.error('Could not find channel. Check CHANNEL_ID.');
-    return;
+    channel = await client.channels.fetch(CHANNEL_ID).catch(() => null);
+    if (!channel) {
+      console.error('Could not find channel. Check CHANNEL_ID.');
+      return;
+    }
   }
 
-  // Pin message showing results before deleting if there was a previous poll
   if (currentPollMessageId) {
     try {
       const old = await channel.messages.fetch(currentPollMessageId);
@@ -69,13 +69,11 @@ async function postDailyPoll() {
 
   const msg = await channel.send({ embeds: [embed] });
 
-  // Add all reaction options
   for (const d of DUNGEONS) {
     await msg.react(d.emoji);
   }
 
   currentPollMessageId = msg.id;
-  currentPollChannelId = channel.id;
   console.log(`[${new Date().toISOString()}] Daily poll posted.`);
 }
 
@@ -83,13 +81,11 @@ async function buildResultsEmbed(message) {
   const votes = [];
   for (const d of DUNGEONS) {
     const reaction = message.reactions.cache.get(d.emoji);
-    // Subtract 1 to exclude the bot's own reaction
     const count = reaction ? reaction.count - 1 : 0;
     if (count > 0) votes.push({ name: d.name, emoji: d.emoji, count });
   }
 
   votes.sort((a, b) => b.count - a.count);
-
   const winner = votes[0];
   const lines = votes.map((v, i) =>
     `${i === 0 ? '🏆' : `${i + 1}.`} ${v.emoji} **${v.name}** — ${v.count} vote${v.count !== 1 ? 's' : ''}`
@@ -119,17 +115,48 @@ function scheduleNextPoll() {
 
   setTimeout(async () => {
     await postDailyPoll();
-    // Then repeat every 24 hours
     setInterval(postDailyPoll, 24 * 60 * 60 * 1000);
   }, msUntil);
 }
 
+async function registerCommands() {
+  const commands = [
+    new SlashCommandBuilder()
+      .setName('testpoll')
+      .setDescription('Post a test daily heroic poll right now (admin only)')
+      .toJSON()
+  ];
+
+  const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+  try {
+    await rest.put(
+      Routes.applicationCommands(client.user.id),
+      { body: commands }
+    );
+    console.log('Slash commands registered.');
+  } catch (err) {
+    console.error('Failed to register slash commands:', err);
+  }
+}
+
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName === 'testpoll') {
+    if (!interaction.member.permissions.has('Administrator')) {
+      await interaction.reply({ content: '❌ Only admins can use this command.', ephemeral: true });
+      return;
+    }
+
+    await interaction.reply({ content: '✅ Posting a test poll now!', ephemeral: true });
+    await postDailyPoll(interaction.channel);
+  }
+});
+
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
+  await registerCommands();
   scheduleNextPoll();
-
-  // If you want an immediate poll on first startup, uncomment:
-  // await postDailyPoll();
 });
 
 client.login(DISCORD_TOKEN);
