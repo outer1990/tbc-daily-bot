@@ -9,12 +9,10 @@ const client = new Client({
   ]
 });
 
-// ─── CONFIG ───────────────────────────────────────────────────────────────────
-const DISCORD_TOKEN   = process.env.DISCORD_TOKEN;
-const CHANNEL_ID      = process.env.CHANNEL_ID;
-const RESET_HOUR      = parseInt(process.env.RESET_HOUR  ?? '15');
-const RESET_MINUTE    = parseInt(process.env.RESET_MINUTE ?? '0');
-// ──────────────────────────────────────────────────────────────────────────────
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const CHANNEL_ID    = process.env.CHANNEL_ID;
+const RESET_HOUR    = parseInt(process.env.RESET_HOUR   ?? '15');
+const RESET_MINUTE  = parseInt(process.env.RESET_MINUTE ?? '0');
 
 const DUNGEONS = [
   { emoji: '1️⃣', name: 'The Mechanar' },
@@ -35,29 +33,81 @@ const DUNGEONS = [
   { emoji: '🇫', name: "Magisters' Terrace" },
 ];
 
-let currentPollMessageId = null;
+let currentPollMessageId  = null;
+let leaderMessageId       = null;
 
+// ── Update the live leader board message ──────────────────────────────────────
+async function updateLeader(channel) {
+  if (!currentPollMessageId) return;
+
+  let pollMsg;
+  try {
+    pollMsg = await channel.messages.fetch(currentPollMessageId);
+  } catch { return; }
+
+  const votes = [];
+  for (const d of DUNGEONS) {
+    const reaction = pollMsg.reactions.cache.get(d.emoji);
+    const count = reaction ? reaction.count - 1 : 0;
+    votes.push({ ...d, count });
+  }
+  votes.sort((a, b) => b.count - a.count);
+
+  const top = votes[0];
+  const hasVotes = top.count > 0;
+
+  const embed = new EmbedBuilder()
+    .setColor(hasVotes ? 0x5865F2 : 0x99AAB5)
+    .setTitle('🏆 Current Leader')
+    .setDescription(
+      hasVotes
+        ? `## ${top.emoji}  ${top.name}\n**${top.count} vote${top.count !== 1 ? 's' : ''}** so far\n\n*React to the poll above to cast your vote!*`
+        : '*No votes yet — be the first to react to the poll above!*'
+    )
+    .setFooter({ text: 'Updates as votes come in • Resets at daily reset' })
+    .setTimestamp();
+
+  try {
+    if (leaderMessageId) {
+      const leaderMsg = await channel.messages.fetch(leaderMessageId);
+      await leaderMsg.edit({ embeds: [embed] });
+    } else {
+      const msg = await channel.send({ embeds: [embed] });
+      leaderMessageId = msg.id;
+    }
+  } catch {
+    // If old leader message is gone, post a new one
+    const msg = await channel.send({ embeds: [embed] });
+    leaderMessageId = msg.id;
+  }
+}
+
+// ── Post the daily poll ───────────────────────────────────────────────────────
 async function postDailyPoll(channel) {
   if (!channel) {
     channel = await client.channels.fetch(CHANNEL_ID).catch(() => null);
-    if (!channel) {
-      console.error('Could not find channel. Check CHANNEL_ID.');
-      return;
-    }
+    if (!channel) { console.error('Channel not found.'); return; }
   }
 
+  // Post yesterday's results summary then delete old poll + leader
   if (currentPollMessageId) {
     try {
       const old = await channel.messages.fetch(currentPollMessageId);
-      const results = await buildResultsEmbed(old);
+      const results = buildResultsEmbed(await getVotes(old));
       await channel.send({ embeds: [results] });
       await old.delete();
-    } catch (e) {
-      // message may already be gone
-    }
+    } catch { /* already gone */ }
+  }
+  if (leaderMessageId) {
+    try {
+      const old = await channel.messages.fetch(leaderMessageId);
+      await old.delete();
+    } catch { /* already gone */ }
+    leaderMessageId = null;
   }
 
-  const embed = new EmbedBuilder()
+  // Post fresh poll
+  const pollEmbed = new EmbedBuilder()
     .setColor(0xF5A623)
     .setTitle('📅 What is today\'s Daily Heroic Dungeon?')
     .setDescription(
@@ -67,30 +117,32 @@ async function postDailyPoll(channel) {
     .setFooter({ text: 'Poll resets daily at server reset • Trolls will be outvoted 😄' })
     .setTimestamp();
 
-  const msg = await channel.send({ embeds: [embed] });
-
-  for (const d of DUNGEONS) {
-    await msg.react(d.emoji);
-  }
-
+  const msg = await channel.send({ embeds: [pollEmbed] });
+  for (const d of DUNGEONS) await msg.react(d.emoji);
   currentPollMessageId = msg.id;
+
+  // Post the initial leader message below the poll
+  await updateLeader(channel);
+
   console.log(`[${new Date().toISOString()}] Daily poll posted.`);
 }
 
-async function buildResultsEmbed(message) {
+// ── Helpers ───────────────────────────────────────────────────────────────────
+async function getVotes(message) {
   const votes = [];
   for (const d of DUNGEONS) {
     const reaction = message.reactions.cache.get(d.emoji);
     const count = reaction ? reaction.count - 1 : 0;
-    if (count > 0) votes.push({ name: d.name, emoji: d.emoji, count });
+    if (count > 0) votes.push({ ...d, count });
   }
+  return votes.sort((a, b) => b.count - a.count);
+}
 
-  votes.sort((a, b) => b.count - a.count);
+function buildResultsEmbed(votes) {
   const winner = votes[0];
   const lines = votes.map((v, i) =>
     `${i === 0 ? '🏆' : `${i + 1}.`} ${v.emoji} **${v.name}** — ${v.count} vote${v.count !== 1 ? 's' : ''}`
   );
-
   return new EmbedBuilder()
     .setColor(0x57F287)
     .setTitle('✅ Yesterday\'s Daily Heroic Results')
@@ -102,8 +154,21 @@ async function buildResultsEmbed(message) {
     .setTimestamp();
 }
 
+// ── React events → update leader ─────────────────────────────────────────────
+async function handleReactionChange(reaction, user) {
+  if (user.bot) return;
+  if (reaction.message.id !== currentPollMessageId) return;
+  const channel = reaction.message.channel;
+  // Small delay so the count updates first
+  setTimeout(() => updateLeader(channel), 1000);
+}
+
+client.on('messageReactionAdd',    (r, u) => handleReactionChange(r, u));
+client.on('messageReactionRemove', (r, u) => handleReactionChange(r, u));
+
+// ── Schedule ──────────────────────────────────────────────────────────────────
 function scheduleNextPoll() {
-  const now = new Date();
+  const now  = new Date();
   const next = new Date();
   next.setUTCHours(RESET_HOUR, RESET_MINUTE, 0, 0);
   if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
@@ -119,6 +184,7 @@ function scheduleNextPoll() {
   }, msUntil);
 }
 
+// ── Slash commands ────────────────────────────────────────────────────────────
 async function registerCommands() {
   const commands = [
     new SlashCommandBuilder()
@@ -126,13 +192,9 @@ async function registerCommands() {
       .setDescription('Post a test daily heroic poll right now (admin only)')
       .toJSON()
   ];
-
   const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
   try {
-    await rest.put(
-      Routes.applicationCommands(client.user.id),
-      { body: commands }
-    );
+    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
     console.log('Slash commands registered.');
   } catch (err) {
     console.error('Failed to register slash commands:', err);
@@ -141,18 +203,17 @@ async function registerCommands() {
 
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-
   if (interaction.commandName === 'testpoll') {
     if (!interaction.member.permissions.has('Administrator')) {
       await interaction.reply({ content: '❌ Only admins can use this command.', ephemeral: true });
       return;
     }
-
     await interaction.reply({ content: '✅ Posting a test poll now!', ephemeral: true });
     await postDailyPoll(interaction.channel);
   }
 });
 
+// ── Boot ──────────────────────────────────────────────────────────────────────
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   await registerCommands();
