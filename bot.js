@@ -7,7 +7,7 @@ const fs   = require('fs');
 const path = require('path');
 
 // ── Persistence ───────────────────────────────────────────────────────────────
-const DATA_FILE = path.join(__dirname, 'data.json');
+const DATA_FILE = process.env.DATA_FILE ?? path.join(__dirname, 'data.json');
 
 function loadData() {
   if (!fs.existsSync(DATA_FILE)) {
