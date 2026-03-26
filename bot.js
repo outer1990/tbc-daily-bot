@@ -66,7 +66,7 @@ const DUNGEONS = [
   { emoji: '🇫', name: "Magisters' Terrace" },
 ];
 
-// ── Poll helpers (unchanged logic) ────────────────────────────────────────────
+// ── Poll helpers ──────────────────────────────────────────────────────────────
 async function updateLeader(channel) {
   if (!data.pollMessageId) return;
   let pollMsg;
@@ -235,12 +235,10 @@ async function postRequestEmbed(channel) {
 // ── Slash command definitions ─────────────────────────────────────────────────
 async function registerCommands() {
   const commands = [
-    // Poll test
     new SlashCommandBuilder()
       .setName('testpoll')
       .setDescription('Post a test daily heroic poll right now (admin only)'),
 
-    // Channel setup
     new SlashCommandBuilder()
       .setName('setrequestchannel')
       .setDescription('Set this channel as the craft request channel (admin only)'),
@@ -249,7 +247,6 @@ async function registerCommands() {
       .setName('setlogchannel')
       .setDescription('Set this channel as the private request log channel (admin only)'),
 
-    // Role pings
     new SlashCommandBuilder()
       .setName('addpingrole')
       .setDescription('Add a role to ping when a request is made (admin only)')
@@ -266,7 +263,6 @@ async function registerCommands() {
       .setName('listpingroles')
       .setDescription('List all roles currently set to be pinged on requests'),
 
-    // Item list management
     new SlashCommandBuilder()
       .setName('additem')
       .setDescription('Add an item to the craft request dropdown (admin only)')
@@ -284,7 +280,6 @@ async function registerCommands() {
       .setName('listitems')
       .setDescription('List all items currently in the craft request dropdown'),
 
-    // Request history
     new SlashCommandBuilder()
       .setName('requesthistory')
       .setDescription('Show recent craft request history (last 20)')
@@ -292,9 +287,10 @@ async function registerCommands() {
         opt.setName('status')
           .setDescription('Filter by status')
           .addChoices(
-            { name: 'All', value: 'all' },
-            { name: 'Open', value: 'open' },
-            { name: 'Closed', value: 'closed' }
+            { name: 'All',      value: 'all'      },
+            { name: 'Open',     value: 'open'     },
+            { name: 'Accepted', value: 'accepted' },
+            { name: 'Declined', value: 'declined' }
           )),
 
     new SlashCommandBuilder()
@@ -303,10 +299,9 @@ async function registerCommands() {
       .addUserOption(opt =>
         opt.setName('user').setDescription('Discord user to look up').setRequired(true)),
 
-    // Close a request
     new SlashCommandBuilder()
       .setName('closerequest')
-      .setDescription('Mark a craft request as complete (admin only)')
+      .setDescription('Manually mark a craft request as complete (admin only)')
       .addIntegerOption(opt =>
         opt.setName('id').setDescription('Request ID to close').setRequired(true)),
 
@@ -320,6 +315,9 @@ async function registerCommands() {
     console.error('Failed to register slash commands:', err);
   }
 }
+
+// ── Shared status icon helper ─────────────────────────────────────────────────
+const statusIcon = (s) => s === 'accepted' ? '✅' : s === 'declined' ? '❌' : '🕐';
 
 // ── Interaction handler ───────────────────────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
@@ -337,9 +335,8 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── Button: open the request modal ──────────────────────────────────────────
+  // ── Button: open request modal ───────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId === 'open_request_modal') {
-    // Build item choices string for the modal hint
     const itemList = data.craftItems.join(', ') || 'No items configured yet';
 
     const modal = new ModalBuilder()
@@ -385,7 +382,98 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // ── Modal submit: save request + notify log channel ─────────────────────────
+  // ── Button: Accept or Decline a request ─────────────────────────────────────
+  if (interaction.isButton() && (
+    interaction.customId.startsWith('accept_request_') ||
+    interaction.customId.startsWith('decline_request_')
+  )) {
+    const isAdmin = interaction.member.permissions.has('Administrator');
+    if (!isAdmin) {
+      await interaction.reply({ content: '❌ Admins only.', ephemeral: true });
+      return;
+    }
+
+    const parts      = interaction.customId.split('_'); // ['accept'/'decline', 'request', id]
+    const action     = parts[0];                        // 'accept' or 'decline'
+    const id         = parseInt(parts[2]);
+    const req        = data.requests.find(r => r.id === id);
+
+    if (!req) {
+      await interaction.reply({ content: `❌ Request #${id} not found.`, ephemeral: true });
+      return;
+    }
+    if (req.status !== 'open') {
+      await interaction.reply({ content: `⚠️ Request #${id} is already **${req.status}**.`, ephemeral: true });
+      return;
+    }
+
+    const isAccepted = action === 'accept';
+    req.status       = isAccepted ? 'accepted' : 'declined';
+    req.closedBy     = interaction.user.tag;
+    req.closedAt     = new Date().toISOString();
+    saveData(data);
+
+    // Edit the officer log message — update embed color/title and disable buttons
+    const updatedEmbed = new EmbedBuilder()
+      .setColor(isAccepted ? 0x57F287 : 0xE74C3C)
+      .setTitle(`${isAccepted ? '✅ Accepted' : '❌ Declined'} — Request #${id}`)
+      .addFields(
+        { name: '👤 Discord User',   value: `<@${req.userId}>`,   inline: true },
+        { name: '🧙 Character Name', value: req.charName,          inline: true },
+        { name: '⚒️ Crafting',        value: req.craftingDesc,      inline: false },
+        { name: '📦 Item Needed',     value: req.itemName,          inline: true },
+        { name: '🔢 Quantity',        value: `${req.quantity}`,     inline: true },
+        {
+          name:  isAccepted ? '✅ Accepted By' : '❌ Declined By',
+          value: req.closedBy,
+          inline: true,
+        },
+        {
+          name:  '🕐 Resolved',
+          value: `<t:${Math.floor(Date.now() / 1000)}:R>`,
+          inline: true,
+        },
+      )
+      .setFooter({ text: `Request ID: ${id} • ${req.status.toUpperCase()}` })
+      .setTimestamp();
+
+    const disabledRow = {
+      type: 1,
+      components: [
+        { type: 2, style: 3, label: '✅ Accept',  custom_id: `accept_request_${id}`,  disabled: true },
+        { type: 2, style: 4, label: '❌ Decline', custom_id: `decline_request_${id}`, disabled: true },
+      ]
+    };
+
+    await interaction.update({ embeds: [updatedEmbed], components: [disabledRow] });
+
+    // DM the requester with the outcome
+    try {
+      const requester = await client.users.fetch(req.userId);
+      const dmEmbed = new EmbedBuilder()
+        .setColor(isAccepted ? 0x57F287 : 0xE74C3C)
+        .setTitle(isAccepted
+          ? '✅ Your Craft Request Was Accepted!'
+          : '❌ Your Craft Request Was Declined')
+        .setDescription(isAccepted
+          ? 'An officer will reach out to you shortly to fulfill your request!'
+          : 'Your request was declined. Feel free to reach out to an officer if you have questions.')
+        .addFields(
+          { name: '⚒️ Crafting', value: req.craftingDesc,                   inline: true },
+          { name: '📦 Item',     value: `${req.itemName} x${req.quantity}`, inline: true },
+        )
+        .setFooter({ text: `Request #${id}` })
+        .setTimestamp();
+
+      await requester.send({ embeds: [dmEmbed] });
+    } catch {
+      // User has DMs disabled — silently ignore
+    }
+
+    return;
+  }
+
+  // ── Modal submit: save request + notify log channel ──────────────────────────
   if (interaction.type === InteractionType.ModalSubmit && interaction.customId === 'craft_request_modal') {
     const charName     = interaction.fields.getTextInputValue('char_name');
     const craftingDesc = interaction.fields.getTextInputValue('crafting_desc');
@@ -398,7 +486,6 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // Save to log
     const requestId = data.requests.length + 1;
     const entry = {
       id:           requestId,
@@ -414,35 +501,42 @@ client.on('interactionCreate', async (interaction) => {
     data.requests.push(entry);
     saveData(data);
 
-    // Confirm to requester
     await interaction.reply({
       content: `✅ **Request #${requestId} submitted!** An officer will reach out to you.`,
       ephemeral: true
     });
 
-    // Send to log channel
     if (data.logChannelId) {
       try {
         const logChannel = await client.channels.fetch(data.logChannelId);
-        const rolePings = data.pingRoles.map(r => `<@&${r}>`).join(' ');
+        const rolePings  = data.pingRoles.map(r => `<@&${r}>`).join(' ');
 
         const logEmbed = new EmbedBuilder()
           .setColor(0xE74C3C)
           .setTitle(`📬 New Craft Request — #${requestId}`)
           .addFields(
-            { name: '👤 Discord User',     value: `<@${interaction.user.id}>`, inline: true },
-            { name: '🧙 Character Name',   value: charName,                    inline: true },
-            { name: '⚒️ Crafting',          value: craftingDesc,                inline: false },
-            { name: '📦 Item Needed',       value: itemName,                    inline: true },
-            { name: '🔢 Quantity',          value: `${quantity}`,               inline: true },
-            { name: '🕐 Submitted',         value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true },
+            { name: '👤 Discord User',   value: `<@${interaction.user.id}>`, inline: true },
+            { name: '🧙 Character Name', value: charName,                    inline: true },
+            { name: '⚒️ Crafting',        value: craftingDesc,                inline: false },
+            { name: '📦 Item Needed',     value: itemName,                    inline: true },
+            { name: '🔢 Quantity',        value: `${quantity}`,               inline: true },
+            { name: '🕐 Submitted',       value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true },
           )
-          .setFooter({ text: `Request ID: ${requestId} • Use /closerequest ${requestId} when fulfilled` })
+          .setFooter({ text: `Request ID: ${requestId} • Use the buttons below to accept or decline` })
           .setTimestamp();
 
+        const actionRow = {
+          type: 1,
+          components: [
+            { type: 2, style: 3, label: '✅ Accept',  custom_id: `accept_request_${requestId}` },
+            { type: 2, style: 4, label: '❌ Decline', custom_id: `decline_request_${requestId}` },
+          ]
+        };
+
         await logChannel.send({
-          content: rolePings || undefined,
-          embeds: [logEmbed]
+          content:    rolePings || undefined,
+          embeds:     [logEmbed],
+          components: [actionRow],
         });
       } catch (err) {
         console.error('Failed to send to log channel:', err);
@@ -456,48 +550,32 @@ client.on('interactionCreate', async (interaction) => {
 
   const isAdmin = interaction.member.permissions.has('Administrator');
 
-  // /testpoll
   if (interaction.commandName === 'testpoll') {
-    if (!isAdmin) {
-      await interaction.reply({ content: '❌ Admins only.', ephemeral: true });
-      return;
-    }
+    if (!isAdmin) { await interaction.reply({ content: '❌ Admins only.', ephemeral: true }); return; }
     await interaction.reply({ content: '✅ Posting a test poll now!', ephemeral: true });
     await postDailyPoll(interaction.channel);
     return;
   }
 
-  // /setrequestchannel
   if (interaction.commandName === 'setrequestchannel') {
-    if (!isAdmin) {
-      await interaction.reply({ content: '❌ Admins only.', ephemeral: true });
-      return;
-    }
+    if (!isAdmin) { await interaction.reply({ content: '❌ Admins only.', ephemeral: true }); return; }
     data.requestChannelId = interaction.channelId;
     saveData(data);
     await postRequestEmbed(interaction.channel);
-    await interaction.reply({ content: `✅ This channel is now the craft request channel.`, ephemeral: true });
+    await interaction.reply({ content: '✅ This channel is now the craft request channel.', ephemeral: true });
     return;
   }
 
-  // /setlogchannel
   if (interaction.commandName === 'setlogchannel') {
-    if (!isAdmin) {
-      await interaction.reply({ content: '❌ Admins only.', ephemeral: true });
-      return;
-    }
+    if (!isAdmin) { await interaction.reply({ content: '❌ Admins only.', ephemeral: true }); return; }
     data.logChannelId = interaction.channelId;
     saveData(data);
-    await interaction.reply({ content: `✅ This channel is now the private request log channel.`, ephemeral: true });
+    await interaction.reply({ content: '✅ This channel is now the private request log channel.', ephemeral: true });
     return;
   }
 
-  // /addpingrole
   if (interaction.commandName === 'addpingrole') {
-    if (!isAdmin) {
-      await interaction.reply({ content: '❌ Admins only.', ephemeral: true });
-      return;
-    }
+    if (!isAdmin) { await interaction.reply({ content: '❌ Admins only.', ephemeral: true }); return; }
     const role = interaction.options.getRole('role');
     if (data.pingRoles.includes(role.id)) {
       await interaction.reply({ content: `⚠️ ${role} is already on the ping list.`, ephemeral: true });
@@ -509,14 +587,10 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // /removepingrole
   if (interaction.commandName === 'removepingrole') {
-    if (!isAdmin) {
-      await interaction.reply({ content: '❌ Admins only.', ephemeral: true });
-      return;
-    }
+    if (!isAdmin) { await interaction.reply({ content: '❌ Admins only.', ephemeral: true }); return; }
     const role = interaction.options.getRole('role');
-    const idx = data.pingRoles.indexOf(role.id);
+    const idx  = data.pingRoles.indexOf(role.id);
     if (idx === -1) {
       await interaction.reply({ content: `⚠️ ${role} is not on the ping list.`, ephemeral: true });
       return;
@@ -527,7 +601,6 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // /listpingroles
   if (interaction.commandName === 'listpingroles') {
     if (data.pingRoles.length === 0) {
       await interaction.reply({ content: '📋 No roles are currently set to be pinged.', ephemeral: true });
@@ -538,12 +611,8 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // /additem
   if (interaction.commandName === 'additem') {
-    if (!isAdmin) {
-      await interaction.reply({ content: '❌ Admins only.', ephemeral: true });
-      return;
-    }
+    if (!isAdmin) { await interaction.reply({ content: '❌ Admins only.', ephemeral: true }); return; }
     const item = interaction.options.getString('item').trim();
     if (data.craftItems.map(i => i.toLowerCase()).includes(item.toLowerCase())) {
       await interaction.reply({ content: `⚠️ **${item}** is already in the list.`, ephemeral: true });
@@ -555,14 +624,10 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // /removeitem
   if (interaction.commandName === 'removeitem') {
-    if (!isAdmin) {
-      await interaction.reply({ content: '❌ Admins only.', ephemeral: true });
-      return;
-    }
+    if (!isAdmin) { await interaction.reply({ content: '❌ Admins only.', ephemeral: true }); return; }
     const item = interaction.options.getString('item').trim();
-    const idx = data.craftItems.findIndex(i => i.toLowerCase() === item.toLowerCase());
+    const idx  = data.craftItems.findIndex(i => i.toLowerCase() === item.toLowerCase());
     if (idx === -1) {
       await interaction.reply({ content: `⚠️ **${item}** not found in the list.`, ephemeral: true });
       return;
@@ -573,7 +638,6 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // /listitems
   if (interaction.commandName === 'listitems') {
     if (data.craftItems.length === 0) {
       await interaction.reply({ content: '📋 No items in the list yet.', ephemeral: true });
@@ -584,21 +648,19 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // /requesthistory
   if (interaction.commandName === 'requesthistory') {
     const statusFilter = interaction.options.getString('status') ?? 'all';
     let filtered = data.requests;
     if (statusFilter !== 'all') filtered = filtered.filter(r => r.status === statusFilter);
 
     const recent = filtered.slice(-20).reverse();
-
     if (recent.length === 0) {
       await interaction.reply({ content: '📋 No requests found.', ephemeral: true });
       return;
     }
 
     const lines = recent.map(r =>
-      `**#${r.id}** [${r.status.toUpperCase()}] — <@${r.userId}> | ${r.charName} | ${r.itemName} x${r.quantity} | <t:${Math.floor(new Date(r.timestamp).getTime() / 1000)}:R>`
+      `**#${r.id}** ${statusIcon(r.status)} [${r.status.toUpperCase()}] — <@${r.userId}> | ${r.charName} | ${r.itemName} x${r.quantity} | <t:${Math.floor(new Date(r.timestamp).getTime() / 1000)}:R>`
     ).join('\n');
 
     const embed = new EmbedBuilder()
@@ -612,9 +674,8 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // /userrequests
   if (interaction.commandName === 'userrequests') {
-    const user = interaction.options.getUser('user');
+    const user     = interaction.options.getUser('user');
     const userReqs = data.requests.filter(r => r.userId === user.id);
 
     if (userReqs.length === 0) {
@@ -623,7 +684,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     const lines = userReqs.slice(-20).reverse().map(r =>
-      `**#${r.id}** [${r.status.toUpperCase()}] — ${r.charName} | ⚒️ ${r.craftingDesc} | 📦 ${r.itemName} x${r.quantity} | <t:${Math.floor(new Date(r.timestamp).getTime() / 1000)}:R>`
+      `**#${r.id}** ${statusIcon(r.status)} [${r.status.toUpperCase()}] — ${r.charName} | ⚒️ ${r.craftingDesc} | 📦 ${r.itemName} x${r.quantity} | <t:${Math.floor(new Date(r.timestamp).getTime() / 1000)}:R>`
     ).join('\n');
 
     const embed = new EmbedBuilder()
@@ -637,25 +698,21 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // /closerequest
   if (interaction.commandName === 'closerequest') {
-    if (!isAdmin) {
-      await interaction.reply({ content: '❌ Admins only.', ephemeral: true });
-      return;
-    }
-    const id = interaction.options.getInteger('id');
+    if (!isAdmin) { await interaction.reply({ content: '❌ Admins only.', ephemeral: true }); return; }
+    const id  = interaction.options.getInteger('id');
     const req = data.requests.find(r => r.id === id);
 
     if (!req) {
       await interaction.reply({ content: `❌ No request found with ID **#${id}**.`, ephemeral: true });
       return;
     }
-    if (req.status === 'closed') {
-      await interaction.reply({ content: `⚠️ Request **#${id}** is already closed.`, ephemeral: true });
+    if (req.status !== 'open') {
+      await interaction.reply({ content: `⚠️ Request **#${id}** is already **${req.status}**.`, ephemeral: true });
       return;
     }
 
-    req.status = 'closed';
+    req.status   = 'closed';
     req.closedBy = interaction.user.tag;
     req.closedAt = new Date().toISOString();
     saveData(data);
@@ -664,10 +721,10 @@ client.on('interactionCreate', async (interaction) => {
       .setColor(0x57F287)
       .setTitle(`✅ Request #${id} Closed`)
       .addFields(
-        { name: '👤 Requester',     value: `<@${req.userId}>`,  inline: true },
-        { name: '🧙 Character',     value: req.charName,         inline: true },
-        { name: '📦 Item',          value: `${req.itemName} x${req.quantity}`, inline: true },
-        { name: '✅ Closed By',     value: req.closedBy,         inline: true },
+        { name: '👤 Requester', value: `<@${req.userId}>`,                  inline: true },
+        { name: '🧙 Character', value: req.charName,                        inline: true },
+        { name: '📦 Item',      value: `${req.itemName} x${req.quantity}`,  inline: true },
+        { name: '✅ Closed By', value: req.closedBy,                        inline: true },
       )
       .setTimestamp();
 
