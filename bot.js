@@ -388,7 +388,8 @@ client.on('interactionCreate', async (interaction) => {
     interaction.customId.startsWith('decline_request_')
   )) {
     const isAdmin = interaction.member.permissions.has('Administrator');
-    if (!isAdmin) {
+    const isOfficer = data.pingRoles.some(r => interaction.member.roles.cache.has(r)); 
+    if (!isAdmin && !isOfficer) {
       await interaction.reply({ content: '❌ Admins only.', ephemeral: true });
       return;
     }
